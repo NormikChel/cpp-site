@@ -2,13 +2,11 @@ FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y libsqlite3-dev && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /data && chown -R 1000:1000 /data
-
 WORKDIR /app
 COPY server /app/server
 RUN chmod +x /app/server
 
-ENV DB_PATH=/data/db.sqlite3
+ENV DB_PATH=/tmp/db.sqlite3
 ENV PORT=8080
 
 EXPOSE 8080
