@@ -1,87 +1,48 @@
 #include <iostream>
+#include <fstream>
 #include <cstdlib>
 #include <string>
-#include <curl/curl.h>
+#include <mutex>
 #include "httplib.h"
 #include "json.hpp"
 
 using json = nlohmann::json;
+std::mutex db_mutex; // Защита от одновременной записи двумя юзерами
 
-size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* userp) {
-    userp->append((char*)contents, size * nmemb);
-    return size * nmemb;
+// Загрузка массива юзеров из файла
+json load_users() {
+    std::ifstream file("users.json");
+    if (!file.is_open()) return json::array();
+    json data;
+    try {
+        file >> data;
+        if (!data.is_array()) return json::array();
+    } catch (...) {
+        return json::array();
+    }
+    return data;
 }
 
-// Безопасное кодирование логина и пароля для URL через libcurl
-std::string url_encode(const std::string& str) {
-    CURL* curl = curl_easy_init();
-    std::string result;
-    if (curl) {
-        char* output = curl_easy_escape(curl, str.c_str(), str.length());
-        if (output) {
-            result = output;
-            curl_free(output);
-        }
-        curl_easy_cleanup(curl);
-    }
-    return result;
-}
-
-std::pair<long, std::string> b4a_request(const std::string& endpoint, const std::string& method, 
-                                         const std::string& body, const std::string& app_id, const std::string& rest_key) {
-    CURL* curl = curl_easy_init();
-    std::string response_string;
-    long http_code = 0;
-
-    if (curl) {
-        std::string host = "://back4app.com";
-        std::string url = "https://" + host + endpoint;
-        struct curl_slist* headers = nullptr;
-        headers = curl_slist_append(headers, ("X-Parse-Application-Id: " + app_id).c_str());
-        headers = curl_slist_append(headers, ("X-Parse-REST-API-Key: " + rest_key).c_str());
-        headers = curl_slist_append(headers, "Content-Type: application/json");
-
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
-
-        if (method == "POST") {
-            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-        }
-
-        curl_easy_perform(curl);
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-
-        curl_slist_free_all(headers);
-        curl_easy_cleanup(curl);
-    }
-    return {http_code, response_string};
+// Сохранение массива юзеров в файл
+void save_users(const json& users) {
+    std::ofstream file("users.json");
+    file << users.dump(4);
 }
 
 int main() {
-    const char* app_id_env = std::getenv("B4A_APP_ID");
-    const char* rest_key_env = std::getenv("B4A_REST_KEY");
-    if (!app_id_env || !rest_key_env) {
-        std::cerr << "Ошибка: не заданы B4A_APP_ID или B4A_REST_KEY!\n";
-        return 1;
-    }
-    std::string app_id(app_id_env);
-    std::string rest_key(rest_key_env);
-
     const char* port_env = std::getenv("PORT");
     int port = port_env ? std::stoi(port_env) : 8080;
 
-    curl_global_init(CURL_GLOBAL_ALL);
     httplib::Server svr;
 
+    // Главная страница
     svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
         std::string html = R"(
             <!DOCTYPE html>
             <html lang="ru">
-            <head><meta charset="UTF-8"><title>C++ + Back4app</title></head>
+            <head><meta charset="UTF-8"><title>C++ Fast JSON Site</title></head>
             <body style="font-family: sans-serif; max-width: 400px; margin: 50px auto;">
-                <h2>Регистрация (C++ & Back4app DB)</h2>
+                <h2>Регистрация (Pure C++ & JSON)</h2>
                 <form action="/register" method="POST">
                     <input type="text" name="username" placeholder="Логин" required><br><br>
                     <input type="password" name="password" placeholder="Пароль" required><br><br>
@@ -94,43 +55,62 @@ int main() {
                     <input type="password" name="password" placeholder="Пароль" required><br><br>
                     <button type="submit">Войти</button>
                 </form>
+                <hr>
+                <a href="/users">Посмотреть список юзеров (JSON)</a>
             </body>
             </html>
         )";
         res.set_content(html, "text/html");
     });
 
-    svr.Post("/register", [&app_id, &rest_key](const httplib::Request& req, httplib::Response& res) {
-        json payload = {
-            {"username", req.get_param_value("username")},
-            {"password", req.get_param_value("password")}
-        };
-
-        auto [code, reply] = b4a_request("/users", "POST", payload.dump(), app_id, rest_key);
-
-        if (code == 201) {
-            res.set_content("<h1>Успешная регистрация! Пользователь сохранен в Back4app!</h1><a href='/'>Назад</a>", "text/html; charset=utf-8");
-        } else {
-            res.set_content("<h1>Ошибка регистрации:</h1><pre>" + reply + "</pre><a href='/'>Назад</a>", "text/html; charset=utf-8");
-        }
-    });
-
-    svr.Post("/login", [&app_id, &rest_key](const httplib::Request& req, httplib::Response& res) {
+    // Регистрация в JSON-массив
+    svr.Post("/register", [](const httplib::Request& req, httplib::Response& res) {
         std::string user = req.get_param_value("username");
         std::string pass = req.get_param_value("password");
 
-        std::string query = "/login?username=" + url_encode(user) + "&password=" + url_encode(pass);
-        auto [code, reply] = b4a_request(query, "GET", "", app_id, rest_key);
+        std::lock_guard<std::mutex> lock(db_mutex);
+        json users = load_users();
 
-        if (code == 200) {
-            res.set_content("<h1>Здарова, " + user + "! Ты вошел через C++ и Back4app!</h1>", "text/html; charset=utf-8");
-        } else {
-            res.set_content("<h1>Неверный логин или пароль!</h1><a href='/'>Назад</a>", "text/html; charset=utf-8");
+        // Проверяем, не занят ли логин
+        for (const auto& u : users) {
+            if (u["username"] == user) {
+                res.set_content("<h1>Ошибка: этот логин уже занят!</h1><a href='/'>Назад</a>", "text/html; charset=utf-8");
+                return;
+            }
         }
+
+        // Добавляем нового юзера в массив
+        users.push_back({{"username", user}, {"password", pass}});
+        save_users(users);
+
+        res.set_content("<h1>Успешная регистрация в JSON!</h1><a href='/'>Назад</a>", "text/html; charset=utf-8");
+    });
+
+    // Вход
+    svr.Post("/login", [](const httplib::Request& req, httplib::Response& res) {
+        std::string user = req.get_param_value("username");
+        std::string pass = req.get_param_value("password");
+
+        std::lock_guard<std::mutex> lock(db_mutex);
+        json users = load_users();
+
+        for (const auto& u : users) {
+            if (u["username"] == user && u["password"] == pass) {
+                res.set_content("<h1>Здарова, " + user + "! Мгновенный вход на чистом C++!</h1><a href='/'>На главную</a>", "text/html; charset=utf-8");
+                return;
+            }
+        }
+
+        res.set_content("<h1>Неверный логин или пароль!</h1><a href='/'>Назад</a>", "text/html; charset=utf-8");
+    });
+
+    // Эндпоинт для проверки всех зарегистрированных (для отладки)
+    svr.Get("/users", [](const httplib::Request&, httplib::Response& res) {
+        std::lock_guard<std::mutex> lock(db_mutex);
+        res.set_content(load_users().dump(4), "application/json");
     });
 
     std::cout << "C++ сервер запущен на порту " << port << "\n";
     svr.listen("0.0.0.0", port);
-    curl_global_cleanup();
     return 0;
 }
