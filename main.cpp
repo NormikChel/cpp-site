@@ -126,11 +126,9 @@ std::string gen_token() {
 }
 
 // --- 4. ИНИЦИАЛИЗАЦИЯ SQLITE3 (db.sqlite3) ---
-// --- 4. ИНИЦИАЛИЗАЦИЯ SQLITE3 (db.sqlite3) ---
-sqlite3* db = nullptr;
-std::mutex db_mtx;
+// ВНИМАНИЕ: db и db_mtx объявлены ГЛОБАЛЬНО (строки 21-22)
+// Здесь — только функции, без повторных определений переменных
 
-// Открывает базу по пути DB_PATH (или ./db.sqlite3), включает WAL
 void init_db() {
     const char* db_path = std::getenv("DB_PATH");
     if (!db_path) {
@@ -184,7 +182,6 @@ void init_db() {
     }
 }
 
-// Чтение Cookie (без изменений)
 std::string get_cookie(const httplib::Request& req, const std::string& name) {
     if (!req.has_header("Cookie")) return "";
     std::string cookies = req.get_header_value("Cookie");
@@ -196,7 +193,6 @@ std::string get_cookie(const httplib::Request& req, const std::string& name) {
     return cookies.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
 }
 
-// Получение текущего пользователя из сессии (без изменений)
 std::string get_current_user(const httplib::Request& req) {
     std::string token = get_cookie(req, "ruttr_session");
     if (token.empty()) return "";
@@ -505,7 +501,7 @@ int main() {
 
     // Лайк поста (исправлено: временная строка сохранена)
     svr.Post("/api/like", [](const httplib::Request& req, httplib::Response& res) {
-        std::string id_val = req.get_param_value("id");   // <-- фикс
+        std::string id_val = req.get_param_value("id");
         char* end = nullptr;
         long id = std::strtol(id_val.c_str(), &end, 10);
         if (*end != '\0' || id <= 0) {
