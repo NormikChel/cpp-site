@@ -20,15 +20,15 @@ jobs:
           repository: yhirose/cpp-httplib
           path: cpp-httplib
 
-      - name: Ставим g++ и nlohmann-json
+      - name: Ставим g++, nlohmann-json и libssl
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++ nlohmann-json3-dev
+          sudo apt-get install -y g++ nlohmann-json3-dev libssl-dev
 
       - name: Копируем httplib.h и компилируем C++ с оптимизацией -O3
         run: |
           cp cpp-httplib/httplib.h .
-          g++ -O3 main.cpp -o server -I/usr/include/nlohmann -lpthread
+          g++ -O3 main.cpp -o server -I/usr/include/nlohmann -lcrypto -lpthread
 
       - name: Заливаем готовый бинарник в репозиторий
         run: |
