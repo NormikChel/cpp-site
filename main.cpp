@@ -248,7 +248,7 @@ std::string render_ssr_page(const std::string& current_user, const std::string& 
         )";
     }
 
-    // --- raw HTML с плейсхолдерами (избегаем ") внутри R"()" ---
+    // --- raw HTML с плейсхолдерами (ОДНА СТРОКА, без конкатенации const char[]) ---
     std::string raw_html = R"(<!DOCTYPE html>
 <html lang="__LANG__">
 <head>
@@ -301,11 +301,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
         <a class="nav-item" href="/">__HOME_LINK__</a>
         <a class="nav-item" href="/explore">__EXPLORE_LINK__</a>
         <a class="nav-item" href="/profile">__PROFILE_LINK__</a>
-        )" + (!current_user.empty() ? R"(
-        <form action="/api/logout" method="POST" style="display:inline;">
-            <button type="submit" class="lang-btn">__LOGOUT_LINK__</button>
-        </form>
-        )" : "") + R"(
+        __LOGOUT_SECTION__
     </aside>
     <main class="feed-col">
         <div class="feed-header">
@@ -361,6 +357,17 @@ async function likePost(id, btn){
     replace_all(raw_html, "__LOGOUT_LINK__", t(lang, "ruttr.auth.logout"));
     replace_all(raw_html, "__TRENDS_TITLE__", t(lang, "ruttr.trends.title"));
     replace_all(raw_html, "__EMPTY_STATE__", t(lang, "ruttr.empty"));
+
+    // --- __LOGOUT_SECTION__ (вставка или пустой блок) ---
+    if (!current_user.empty()) {
+        replace_all(raw_html, "__LOGOUT_SECTION__", R"(
+        <form action="/api/logout" method="POST" style="display:inline;">
+            <button type="submit" class="lang-btn">__LOGOUT_LINK__</button>
+        </form>
+        )");
+    } else {
+        replace_all(raw_html, "__LOGOUT_SECTION__", "");
+    }
 
     return minify_html(raw_html);
 }
