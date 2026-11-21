@@ -126,13 +126,37 @@ std::string gen_token() {
 }
 
 // --- 4. ИНИЦИАЛИЗАЦИЯ SQLITE3 (db.sqlite3) ---
+// --- 4. ИНИЦИАЛИЗАЦИЯ SQLITE3 (db.sqlite3) ---
+sqlite3* db = nullptr;
+std::mutex db_mtx;
+
+// Открывает базу по пути DB_PATH (или ./db.sqlite3), включает WAL
 void init_db() {
-    if (sqlite3_open("db.sqlite3", &db) != SQLITE_OK) {
-        std::cerr << "Ошибка открытия db.sqlite3\n";
+    const char* db_path = std::getenv("DB_PATH");
+    if (!db_path) {
+        std::cerr << "Ошибка: не установлена переменная DB_PATH\n";
         exit(1);
     }
-    const char* sql = R"(
-        PRAGMA journal_mode=WAL;
+
+    if (sqlite3_open(db_path, &db) != SQLITE_OK) {
+        std::cerr << "Ошибка открытия " << db_path
+                  << ": " << sqlite3_errmsg(db) << "\n";
+        exit(1);
+    }
+
+    // WAL + таймаут для конкурентного доступа
+    char* err = nullptr;
+    const char* pragma_sql =
+        "PRAGMA journal_mode=WAL;"
+        "PRAGMA busy_timeout=5000;"
+        "PRAGMA foreign_keys=ON;";
+    if (sqlite3_exec(db, pragma_sql, nullptr, nullptr, &err) != SQLITE_OK) {
+        std::cerr << "PRAGMA error: " << err << "\n";
+        sqlite3_free(err);
+    }
+
+    // Создание таблиц (IF NOT EXISTS)
+    const char* create_sql = R"(
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
@@ -153,13 +177,14 @@ void init_db() {
             created_at INTEGER NOT NULL
         );
     )";
-    char* err = nullptr;
-    if (sqlite3_exec(db, sql, nullptr, nullptr, &err) != SQLITE_OK) {
-        std::cerr << "SQL Error: " << err << "\n";
+
+    if (sqlite3_exec(db, create_sql, nullptr, nullptr, &err) != SQLITE_OK) {
+        std::cerr << "SQL create error: " << err << "\n";
         sqlite3_free(err);
     }
 }
 
+// Чтение Cookie (без изменений)
 std::string get_cookie(const httplib::Request& req, const std::string& name) {
     if (!req.has_header("Cookie")) return "";
     std::string cookies = req.get_header_value("Cookie");
@@ -171,6 +196,7 @@ std::string get_cookie(const httplib::Request& req, const std::string& name) {
     return cookies.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
 }
 
+// Получение текущего пользователя из сессии (без изменений)
 std::string get_current_user(const httplib::Request& req) {
     std::string token = get_cookie(req, "ruttr_session");
     if (token.empty()) return "";
