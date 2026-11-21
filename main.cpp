@@ -7,13 +7,26 @@
 
 using json = nlohmann::json;
 
-// Вспомогательная функция для получения ответа от API Back4app
 size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* userp) {
     userp->append((char*)contents, size * nmemb);
     return size * nmemb;
 }
 
-// Функция отправки запросов в Back4app Database
+// Безопасное кодирование логина и пароля для URL через libcurl
+std::string url_encode(const std::string& str) {
+    CURL* curl = curl_easy_init();
+    std::string result;
+    if (curl) {
+        char* output = curl_easy_escape(curl, str.c_str(), str.length());
+        if (output) {
+            result = output;
+            curl_free(output);
+        }
+        curl_easy_cleanup(curl);
+    }
+    return result;
+}
+
 std::pair<long, std::string> b4a_request(const std::string& endpoint, const std::string& method, 
                                          const std::string& body, const std::string& app_id, const std::string& rest_key) {
     CURL* curl = curl_easy_init();
@@ -21,7 +34,8 @@ std::pair<long, std::string> b4a_request(const std::string& endpoint, const std:
     long http_code = 0;
 
     if (curl) {
-        std::string url = "https://back4app.com" + endpoint;
+        std::string host = "://back4app.com";
+        std::string url = "https://" + host + endpoint;
         struct curl_slist* headers = nullptr;
         headers = curl_slist_append(headers, ("X-Parse-Application-Id: " + app_id).c_str());
         headers = curl_slist_append(headers, ("X-Parse-REST-API-Key: " + rest_key).c_str());
@@ -61,7 +75,6 @@ int main() {
     curl_global_init(CURL_GLOBAL_ALL);
     httplib::Server svr;
 
-    // Главная страница
     svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
         std::string html = R"(
             <!DOCTYPE html>
@@ -87,7 +100,6 @@ int main() {
         res.set_content(html, "text/html");
     });
 
-    // Регистрация через встроенный эндпоинт /users в Back4app
     svr.Post("/register", [&app_id, &rest_key](const httplib::Request& req, httplib::Response& res) {
         json payload = {
             {"username", req.get_param_value("username")},
@@ -103,13 +115,11 @@ int main() {
         }
     });
 
-    // Вход через встроенный эндпоинт /login в Back4app
     svr.Post("/login", [&app_id, &rest_key](const httplib::Request& req, httplib::Response& res) {
         std::string user = req.get_param_value("username");
         std::string pass = req.get_param_value("password");
 
-        // Экранируем параметры для GET-запроса
-        std::string query = "/login?username=" + httplib::detail::encode_url(user) + "&password=" + httplib::detail::encode_url(pass);
+        std::string query = "/login?username=" + url_encode(user) + "&password=" + url_encode(pass);
         auto [code, reply] = b4a_request(query, "GET", "", app_id, rest_key);
 
         if (code == 200) {
