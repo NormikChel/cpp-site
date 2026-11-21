@@ -338,21 +338,29 @@ async function likePost(id, btn){
 </html>
 )";
 
-    // --- замены плейсхолдеров (избегаем ") внутри raw) ---
-    std::replace(raw_html.begin(), raw_html.end(), "__LANG__", lang);
-    std::replace(raw_html.begin(), raw_html.end(), "__LANG_NEXT__", t(lang, "ruttr.lang.next"));
-    std::replace(raw_html.begin(), raw_html.end(), "__LANG_SWITCH__", t(lang, "ruttr.lang.switch"));
-    std::replace(raw_html.begin(), raw_html.end(), "__POST_BUTTON__", t(lang, "ruttr.post.button"));
-    std::replace(raw_html.begin(), raw_html.end(), "__LOGIN_BUTTON__", t(lang, "ruttr.auth.login"));
-    std::replace(raw_html.begin(), raw_html.end(), "__REGISTER_BUTTON__", t(lang, "ruttr.auth.register"));
-    std::replace(raw_html.begin(), raw_html.end(), "__USERNAME_PLACEHOLDER__", t(lang, "ruttr.auth.username"));
-    std::replace(raw_html.begin(), raw_html.end(), "__PASSWORD_PLACEHOLDER__", t(lang, "ruttr.auth.password"));
-    std::replace(raw_html.begin(), raw_html.end(), "__HOME_LINK__", t(lang, "ruttr.nav.home"));
-    std::replace(raw_html.begin(), raw_html.end(), "__EXPLORE_LINK__", t(lang, "ruttr.nav.explore"));
-    std::replace(raw_html.begin(), raw_html.end(), "__PROFILE_LINK__", t(lang, "ruttr.nav.profile"));
-    std::replace(raw_html.begin(), raw_html.end(), "__LOGOUT_LINK__", t(lang, "ruttr.auth.logout"));
-    std::replace(raw_html.begin(), raw_html.end(), "__TRENDS_TITLE__", t(lang, "ruttr.trends.title"));
-    std::replace(raw_html.begin(), raw_html.end(), "__EMPTY_STATE__", t(lang, "ruttr.empty"));
+    // --- замены плейсхолдеров (исправлено: replace_all для подстрок) ---
+    auto replace_all = [](std::string& str, const std::string& from, const std::string& to) {
+        size_t pos = 0;
+        while ((pos = str.find(from, pos)) != std::string::npos) {
+            str.replace(pos, from.length(), to);
+            pos += to.length();
+        }
+    };
+
+    replace_all(raw_html, "__LANG__", lang);
+    replace_all(raw_html, "__LANG_NEXT__", t(lang, "ruttr.lang.next"));
+    replace_all(raw_html, "__LANG_SWITCH__", t(lang, "ruttr.lang.switch"));
+    replace_all(raw_html, "__POST_BUTTON__", t(lang, "ruttr.post.button"));
+    replace_all(raw_html, "__LOGIN_BUTTON__", t(lang, "ruttr.auth.login"));
+    replace_all(raw_html, "__REGISTER_BUTTON__", t(lang, "ruttr.auth.register"));
+    replace_all(raw_html, "__USERNAME_PLACEHOLDER__", t(lang, "ruttr.auth.username"));
+    replace_all(raw_html, "__PASSWORD_PLACEHOLDER__", t(lang, "ruttr.auth.password"));
+    replace_all(raw_html, "__HOME_LINK__", t(lang, "ruttr.nav.home"));
+    replace_all(raw_html, "__EXPLORE_LINK__", t(lang, "ruttr.nav.explore"));
+    replace_all(raw_html, "__PROFILE_LINK__", t(lang, "ruttr.nav.profile"));
+    replace_all(raw_html, "__LOGOUT_LINK__", t(lang, "ruttr.auth.logout"));
+    replace_all(raw_html, "__TRENDS_TITLE__", t(lang, "ruttr.trends.title"));
+    replace_all(raw_html, "__EMPTY_STATE__", t(lang, "ruttr.empty"));
 
     return minify_html(raw_html);
 }
@@ -462,11 +470,11 @@ int main() {
         res.set_redirect("/");
     });
 
-    // Лайк поста
+    // Лайк поста (исправлено: временная строка сохранена)
     svr.Post("/api/like", [](const httplib::Request& req, httplib::Response& res) {
-        const char* id_str = req.get_param_value("id").c_str();
+        std::string id_val = req.get_param_value("id");   // <-- фикс
         char* end = nullptr;
-        long id = std::strtol(id_str, &end, 10);
+        long id = std::strtol(id_val.c_str(), &end, 10);
         if (*end != '\0' || id <= 0) {
             res.set_content("{\"error\":\"invalid id\"}", "application/json");
             return;
