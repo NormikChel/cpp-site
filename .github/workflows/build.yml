@@ -14,18 +14,18 @@ jobs:
       - name: Скачиваем код
         uses: actions/checkout@v4
 
-      - name: Ставим g++ и libcurl
+      - name: Ставим g++, libcurl и nlohmann-json
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++ libcurl4-openssl-dev wget
+          sudo apt-get install -y g++ libcurl4-openssl-dev nlohmann-json3-dev git
 
-      - name: Скачиваем однофайловые библиотеки (httplib и json)
+      - name: Скачиваем библиотеку cpp-httplib
         run: |
-          wget https://githubusercontent.com
-          wget https://github.com
+          git clone --depth 1 https://github.com
+          cp cpp-httplib/httplib.h .
 
       - name: Компилируем C++ с оптимизацией -O3
-        run: g++ -O3 main.cpp -o server -lcurl -lpthread
+        run: g++ -O3 main.cpp -o server -I/usr/include/nlohmann -lcurl -lpthread
 
       - name: Заливаем готовый бинарник в репозиторий
         run: |
