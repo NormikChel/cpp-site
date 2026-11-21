@@ -1,0 +1,36 @@
+name: Build C++ Binary
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Скачиваем код
+        uses: actions/checkout@v4
+
+      - name: Ставим g++ и libcurl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ libcurl4-openssl-dev wget
+
+      - name: Скачиваем однофайловые библиотеки (httplib и json)
+        run: |
+          wget https://githubusercontent.com
+          wget https://github.com
+
+      - name: Компилируем C++ с оптимизацией -O3
+        run: g++ -O3 main.cpp -o server -lcurl -lpthread
+
+      - name: Заливаем готовый бинарник в репозиторий
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add -f server
+          git commit -m "Build binary" || exit 0
+          git push
