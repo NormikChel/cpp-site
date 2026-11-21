@@ -2,16 +2,19 @@
 #include <sstream>
 #include <iomanip>
 #include <cstdlib>
+#include <cstring>
+#include <cctype>
 #include <string>
 #include <vector>
 #include <map>
 #include <mutex>
 #include <random>
 #include <ctime>
+#include <algorithm>
 #include <sqlite3.h>
 #include <openssl/evp.h>
 #include "httplib.h"
-#include "json.hpp"
+#include "nlohmann/json.hpp"
 
 using json = nlohmann::json;
 
@@ -103,7 +106,7 @@ std::string hash_password(const std::string& password) {
     unsigned int length = 0;
     EVP_MD_CTX* ctx = EVP_MD_CTX_new();
     EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
-    EVP_DigestUpdate(ctx, salted.c_str(), salted.size());
+    EVP_DigestUpdate(ctx, salted.c_str(), static_cast<int>(salted.size()));
     EVP_DigestFinal_ex(ctx, hash, &length);
     EVP_MD_CTX_free(ctx);
 
@@ -186,6 +189,7 @@ std::string get_current_user(const httplib::Request& req) {
 
 // --- 5. SSR ГЕНЕРАЦИЯ СТРАНИЦЫ В СТИЛЕ GETTR ---
 std::string render_ssr_page(const std::string& current_user, const std::string& lang) {
+    // --- посты ---
     std::string posts_html;
     {
         std::lock_guard<std::mutex> lock(db_mtx);
@@ -199,12 +203,12 @@ std::string render_ssr_page(const std::string& current_user, const std::string& 
 
                 posts_html += "<article class='post-card'>"
                     "<div class='post-header'>"
-                        "<div class='avatar'>" + std::string(1, toupper(author[0])) + "</div>"
+                        "<div class='avatar'>" + std::string(1, std::toupper(static_cast<unsigned char>(author[0]))) + "</div>"
                         "<div><span class='author-name'>" + author + "</span> <span class='handle'>@" + author + "</span></div>"
                     "</div>"
                     "<div class='post-body'>" + text + "</div>"
                     "<div class='post-actions'>"
-                        "<button class='like-btn' onclick='likePost(" + std::to_string(id) + ", this)'>♥ <span>" + std::to_string(likes) + "</span></button>"
+                        "<button class='like-btn' onclick='likePost(\"" + std::to_string(id) + "\", this)'>♥ <span>" + std::to_string(likes) + "</span></button>"
                     "</div>"
                 "</article>";
             }
@@ -215,6 +219,7 @@ std::string render_ssr_page(const std::string& current_user, const std::string& 
         posts_html = "<div class='empty-state'>" + t(lang, "ruttr.empty") + "</div>";
     }
 
+    // --- композитор / авторизация ---
     std::string composer_or_auth;
     if (!current_user.empty()) {
         composer_or_auth = R"(
@@ -222,7 +227,7 @@ std::string render_ssr_page(const std::string& current_user, const std::string& 
                 <textarea name="content" maxlength="777" placeholder=")" + t(lang, "ruttr.post.placeholder") + R"(" required></textarea>
                 <div class="composer-footer">
                     <span class="user-badge">@)" + escape_html(current_user) + R"(</span>
-                    <button type="submit" class="btn-primary">)" + t(lang, "ruttr.post.button") + R"(</button>
+                    <button type="submit" class="btn-primary">__POST_BUTTON__</button>
                 </div>
             </form>
         )";
@@ -230,21 +235,22 @@ std::string render_ssr_page(const std::string& current_user, const std::string& 
         composer_or_auth = R"(
             <div class="auth-box">
                 <form action="/api/login" method="POST" class="auth-form">
-                    <input type="text" name="username" placeholder=")" + t(lang, "ruttr.auth.username") + R"(" required>
-                    <input type="password" name="password" placeholder=")" + t(lang, "ruttr.auth.password") + R"(" required>
-                    <button type="submit" class="btn-primary">)" + t(lang, "ruttr.auth.login") + R"(</button>
+                    <input type="text" name="username" placeholder="__USERNAME_PLACEHOLDER__" required>
+                    <input type="password" name="password" placeholder="__PASSWORD_PLACEHOLDER__" required>
+                    <button type="submit" class="btn-primary">__LOGIN_BUTTON__</button>
                 </form>
                 <form action="/api/register" method="POST" class="auth-form">
-                    <input type="text" name="username" placeholder=")" + t(lang, "ruttr.auth.username") + R"(" required>
-                    <input type="password" name="password" placeholder=")" + t(lang, "ruttr.auth.password") + R"(" required>
-                    <button type="submit" class="btn-outline">)" + t(lang, "ruttr.auth.register") + R"(</button>
+                    <input type="text" name="username" placeholder="__USERNAME_PLACEHOLDER__" required>
+                    <input type="password" name="password" placeholder="__PASSWORD_PLACEHOLDER__" required>
+                    <button type="submit" class="btn-outline">__REGISTER_BUTTON__</button>
                 </form>
             </div>
         )";
     }
 
+    // --- raw HTML с плейсхолдерами (избегаем ") внутри R"()" ---
     std::string raw_html = R"(<!DOCTYPE html>
-<html lang=")" + lang + R"(">
+<html lang="__LANG__">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -254,7 +260,6 @@ std::string render_ssr_page(const std::string& current_user, const std::string& 
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text)}
 .layout{max-width:1200px;margin:0 auto;display:grid;grid-template-columns:240px 600px 300px;gap:24px;padding:0 16px}
-Используйте код с осторожностью.
 @media(max-width:1150px){.layout{grid-template-columns:200px 1fr}.sidebar-right{display:none}}
 @media(max-width:768px){.layout{grid-template-columns:1fr}.sidebar-left{display:none}}
 .sidebar-left{position:sticky;top:0;height:100vh;padding:20px 0;display:flex;flex-direction:column;justify-content:space-between}
@@ -288,161 +293,197 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 .trend-item{padding:10px 0;border-top:1px solid var(--border);font-weight:700;font-size:15px}
 .empty-state{padding:40px 20px;text-align:center;color:var(--text-sub)}
 .lang-btn{background:var(--bg-sec);border:none;padding:8px 16px;border-radius:999px;font-weight:700;cursor:pointer;font-size:13px;text-decoration:none;color:var(--text)}
-
-
-
-
-
-
-🔥 RUTTR
-)" + t(lang, "ruttr.nav.home") + R"(
-
-
-)" + (!current_user.empty() ? "" + t(lang, "ruttr.auth.logout") + "" : "") + R"(
-
-
-)" + t(lang, "ruttr.nav.home") + R"(
-<a href="/lang?set=)" + t(lang, "ruttr.lang.next") + R"(" class="lang-btn">🌐 )" + t(lang, "ruttr.lang.switch") + R"(
-
-)" + composer_or_auth + R"(
-)" + posts_html + R"(
-
-
-
-)" + t(lang, "ruttr.trends.title") + R"(
-#FreeSpeech
-#RUTTR
-#Liberty
-
-
-
-
+</style>
+</head>
+<body>
+<div class="layout">
+    <aside class="sidebar-left">
+        <a class="nav-item" href="/">__HOME_LINK__</a>
+        <a class="nav-item" href="/explore">__EXPLORE_LINK__</a>
+        <a class="nav-item" href="/profile">__PROFILE_LINK__</a>
+        )" + (!current_user.empty() ? R"(
+        <form action="/api/logout" method="POST" style="display:inline;">
+            <button type="submit" class="lang-btn">__LOGOUT_LINK__</button>
+        </form>
+        )" : "") + R"(
+    </aside>
+    <main class="feed-col">
+        <div class="feed-header">
+            <h1>🔥 RUTTR</h1>
+            <a href="/lang?set=__LANG_NEXT__" class="lang-btn">__LANG_SWITCH__</a>
+        </div>
+        )" + composer_or_auth + R"(
+        )" + posts_html + R"(
+    </main>
+    <aside class="sidebar-right">
+        <div class="trend-box">
+            <h3>__TRENDS_TITLE__</h3>
+            <div class="trend-item">#FreeSpeech</div>
+            <div class="trend-item">#RUTTR</div>
+            <div class="trend-item">#Liberty</div>
+        </div>
+    </aside>
+</div>
+<script>
 async function likePost(id, btn){
-const r = await fetch('/api/like?id=' + id, {method:'POST'});
-if(r.ok){
-const d = await r.json();
-btn.querySelector('span').textContent = d.likes;
-btn.style.color = '#FC223B';
+    const r = await fetch('/api/like?id=' + id, {method:'POST'});
+    if(r.ok){
+        const d = await r.json();
+        btn.querySelector('span').textContent = d.likes;
+        btn.style.color = '#FC223B';
+    }
 }
-}
-
-
+</script>
+</body>
+</html>
 )";
-return minify_html(raw_html);
+
+    // --- замены плейсхолдеров (избегаем ") внутри raw) ---
+    std::replace(raw_html.begin(), raw_html.end(), "__LANG__", lang);
+    std::replace(raw_html.begin(), raw_html.end(), "__LANG_NEXT__", t(lang, "ruttr.lang.next"));
+    std::replace(raw_html.begin(), raw_html.end(), "__LANG_SWITCH__", t(lang, "ruttr.lang.switch"));
+    std::replace(raw_html.begin(), raw_html.end(), "__POST_BUTTON__", t(lang, "ruttr.post.button"));
+    std::replace(raw_html.begin(), raw_html.end(), "__LOGIN_BUTTON__", t(lang, "ruttr.auth.login"));
+    std::replace(raw_html.begin(), raw_html.end(), "__REGISTER_BUTTON__", t(lang, "ruttr.auth.register"));
+    std::replace(raw_html.begin(), raw_html.end(), "__USERNAME_PLACEHOLDER__", t(lang, "ruttr.auth.username"));
+    std::replace(raw_html.begin(), raw_html.end(), "__PASSWORD_PLACEHOLDER__", t(lang, "ruttr.auth.password"));
+    std::replace(raw_html.begin(), raw_html.end(), "__HOME_LINK__", t(lang, "ruttr.nav.home"));
+    std::replace(raw_html.begin(), raw_html.end(), "__EXPLORE_LINK__", t(lang, "ruttr.nav.explore"));
+    std::replace(raw_html.begin(), raw_html.end(), "__PROFILE_LINK__", t(lang, "ruttr.nav.profile"));
+    std::replace(raw_html.begin(), raw_html.end(), "__LOGOUT_LINK__", t(lang, "ruttr.auth.logout"));
+    std::replace(raw_html.begin(), raw_html.end(), "__TRENDS_TITLE__", t(lang, "ruttr.trends.title"));
+    std::replace(raw_html.begin(), raw_html.end(), "__EMPTY_STATE__", t(lang, "ruttr.empty"));
+
+    return minify_html(raw_html);
 }
+
 int main() {
-init_db();
-const char* port_env = std::getenv("PORT");
-int port = port_env ? std::stoi(port_env) : 8080;
-httplib::Server svr;
-// Переключение языка (i18n)
-svr.Get("/lang", [](const httplib::Request& req, httplib::Response& res) {
-std::string l = req.get_param_value("set");
-if (l != "ru" && l != "en") l = "ru";
-res.set_header("Set-Cookie", "ruttr_lang=" + l + "; Path=/; Max-Age=31536000");
-res.set_redirect("/");
-});
-// Главная страница (SSR)
-svr.Get("/", [](const httplib::Request& req, httplib::Response& res) {
-std::string lang = get_cookie(req, "ruttr_lang");
-if (lang != "en" && lang != "ru") lang = "ru";
-std::string user = get_current_user(req);
-res.set_content(render_ssr_page(user, lang), "text/html; charset=utf-8");
-});
-// Регистрация
-svr.Post("/api/register", [](const httplib::Request& req, httplib::Response& res) {
-std::string user = req.get_param_value("username");
-std::string pass = req.get_param_value("password");
-if (user.size() < 3 || pass.size() < 4) {
-res.set_redirect("/");
-return;
-}
-std::string hash = hash_password(pass);
-std::lock_guardstd::mutex lock(db_mtx);
-sqlite3_stmt* stmt;
-if (sqlite3_prepare_v2(db, "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?);", -1, &stmt, nullptr) == SQLITE_OK) {
-sqlite3_bind_text(stmt, 1, user.c_str(), -1, SQLITE_STATIC);
-sqlite3_bind_text(stmt, 2, hash.c_str(), -1, SQLITE_STATIC);
-sqlite3_bind_int64(stmt, 3, std::time(nullptr));
-sqlite3_step(stmt);
-sqlite3_finalize(stmt);
-}
-res.set_redirect("/");
-});
-// Вход
-svr.Post("/api/login", [](const httplib::Request& req, httplib::Response& res) {
-std::string user = req.get_param_value("username");
-std::string pass = req.get_param_value("password");
-std::string hash = hash_password(pass);
-std::lock_guardstd::mutex lock(db_mtx);
-sqlite3_stmt* stmt;
-int uid = -1;
-if (sqlite3_prepare_v2(db, "SELECT id FROM users WHERE username = ? AND password_hash = ?;", -1, &stmt, nullptr) == SQLITE_OK) {
-sqlite3_bind_text(stmt, 1, user.c_str(), -1, SQLITE_STATIC);
-sqlite3_bind_text(stmt, 2, hash.c_str(), -1, SQLITE_STATIC);
-if (sqlite3_step(stmt) == SQLITE_ROW) uid = sqlite3_column_int(stmt, 0);
-sqlite3_finalize(stmt);
-}
-if (uid > 0) {
-std::string token = gen_token();
-if (sqlite3_prepare_v2(db, "INSERT INTO sessions (token, user_id, username) VALUES (?, ?, ?);", -1, &stmt, nullptr) == SQLITE_OK) {
-sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_STATIC);
-sqlite3_bind_int(stmt, 2, uid);
-sqlite3_bind_text(stmt, 3, user.c_str(), -1, SQLITE_STATIC);
-sqlite3_step(stmt);
-sqlite3_finalize(stmt);
-}
-res.set_header("Set-Cookie", "ruttr_session=" + token + "; Path=/; HttpOnly; Max-Age=2592000");
-}
-res.set_redirect("/");
-});
-// Выход
-svr.Post("/api/logout", [](const httplib::Request& req, httplib::Response& res) {
-std::string token = get_cookie(req, "ruttr_session");
-if (!token.empty()) {
-std::lock_guardstd::mutex lock(db_mtx);
-sqlite3_stmt* stmt;
-if (sqlite3_prepare_v2(db, "DELETE FROM sessions WHERE token = ?;", -1, &stmt, nullptr) == SQLITE_OK) {
-sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_STATIC);
-sqlite3_step(stmt);
-sqlite3_finalize(stmt);
-}
-}
-res.set_header("Set-Cookie", "ruttr_session=; Path=/; Max-Age=0");
-res.set_redirect("/");
-});
-// Создание поста
-svr.Post("/api/post", [](const httplib::Request& req, httplib::Response& res) {
-std::string user = get_current_user(req);
-std::string content = req.get_param_value("content");
-if (!user.empty() && !content.empty() && content.size() <= 2000) {
-std::lock_guardstd::mutex lock(db_mtx);
-sqlite3_stmt* stmt;
-if (sqlite3_prepare_v2(db, "INSERT INTO posts (user_id, username, content, created_at) VALUES (1, ?, ?, ?);", -1, &stmt, nullptr) == SQLITE_OK) {
-sqlite3_bind_text(stmt, 1, user.c_str(), -1, SQLITE_STATIC);
-sqlite3_bind_text(stmt, 2, content.c_str(), -1, SQLITE_STATIC);
-sqlite3_bind_int64(stmt, 3, std::time(nullptr));
-sqlite3_step(stmt);
-sqlite3_finalize(stmt);
-}
-}
-res.set_redirect("/");
-});
-// Лайк поста
-svr.Post("/api/like", [](const httplib::Request& req, httplib::Response& res) {
-int id = std::stoi(req.get_param_value("id"));
-int likes = 0;
-std::lock_guardstd::mutex lock(db_mtx);
-sqlite3_stmt* stmt;
-if (sqlite3_prepare_v2(db, "UPDATE posts SET likes = likes + 1 WHERE id = ? RETURNING likes;", -1, &stmt, nullptr) == SQLITE_OK) {
-sqlite3_bind_int(stmt, 1, id);
-if (sqlite3_step(stmt) == SQLITE_ROW) likes = sqlite3_column_int(stmt, 0);
-sqlite3_finalize(stmt);
-}
-res.set_content("{"likes":" + std::to_string(likes) + "}", "application/json");
-});
-std::cout << "RUTTR C++ Server running on port " << port << "\n";
-svr.listen("0.0.0.0", port);
-sqlite3_close(db);
-return 0;
+    init_db();
+    const char* port_env = std::getenv("PORT");
+    int port = port_env ? std::stoi(port_env) : 8080;
+    httplib::Server svr;
+
+    // Переключение языка (i18n)
+    svr.Get("/lang", [](const httplib::Request& req, httplib::Response& res) {
+        std::string l = req.get_param_value("set");
+        if (l != "ru" && l != "en") l = "ru";
+        res.set_header("Set-Cookie", "ruttr_lang=" + l + "; Path=/; Max-Age=31536000");
+        res.set_redirect("/");
+    });
+
+    // Главная страница (SSR)
+    svr.Get("/", [](const httplib::Request& req, httplib::Response& res) {
+        std::string lang = get_cookie(req, "ruttr_lang");
+        if (lang != "en" && lang != "ru") lang = "ru";
+        std::string user = get_current_user(req);
+        res.set_content(render_ssr_page(user, lang), "text/html; charset=utf-8");
+    });
+
+    // Регистрация
+    svr.Post("/api/register", [](const httplib::Request& req, httplib::Response& res) {
+        std::string user = req.get_param_value("username");
+        std::string pass = req.get_param_value("password");
+        if (user.size() < 3 || pass.size() < 4) {
+            res.set_redirect("/");
+            return;
+        }
+        std::string hash = hash_password(pass);
+        std::lock_guard<std::mutex> lock(db_mtx);
+        sqlite3_stmt* stmt;
+        if (sqlite3_prepare_v2(db, "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?);", -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, user.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 2, hash.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_int64(stmt, 3, std::time(nullptr));
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
+        res.set_redirect("/");
+    });
+
+    // Вход
+    svr.Post("/api/login", [](const httplib::Request& req, httplib::Response& res) {
+        std::string user = req.get_param_value("username");
+        std::string pass = req.get_param_value("password");
+        std::string hash = hash_password(pass);
+        std::lock_guard<std::mutex> lock(db_mtx);
+        sqlite3_stmt* stmt;
+        int uid = -1;
+        if (sqlite3_prepare_v2(db, "SELECT id FROM users WHERE username = ? AND password_hash = ?;", -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, user.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 2, hash.c_str(), -1, SQLITE_STATIC);
+            if (sqlite3_step(stmt) == SQLITE_ROW) uid = sqlite3_column_int(stmt, 0);
+            sqlite3_finalize(stmt);
+        }
+        if (uid > 0) {
+            std::string token = gen_token();
+            if (sqlite3_prepare_v2(db, "INSERT INTO sessions (token, user_id, username) VALUES (?, ?, ?);", -1, &stmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_STATIC);
+                sqlite3_bind_int(stmt, 2, uid);
+                sqlite3_bind_text(stmt, 3, user.c_str(), -1, SQLITE_STATIC);
+                sqlite3_step(stmt);
+                sqlite3_finalize(stmt);
+            }
+            res.set_header("Set-Cookie", "ruttr_session=" + token + "; Path=/; HttpOnly; Max-Age=2592000");
+        }
+        res.set_redirect("/");
+    });
+
+    // Выход
+    svr.Post("/api/logout", [](const httplib::Request& req, httplib::Response& res) {
+        std::string token = get_cookie(req, "ruttr_session");
+        if (!token.empty()) {
+            std::lock_guard<std::mutex> lock(db_mtx);
+            sqlite3_stmt* stmt;
+            if (sqlite3_prepare_v2(db, "DELETE FROM sessions WHERE token = ?;", -1, &stmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_STATIC);
+                sqlite3_step(stmt);
+                sqlite3_finalize(stmt);
+            }
+        }
+        res.set_header("Set-Cookie", "ruttr_session=; Path=/; Max-Age=0");
+        res.set_redirect("/");
+    });
+
+    // Создание поста
+    svr.Post("/api/post", [](const httplib::Request& req, httplib::Response& res) {
+        std::string user = get_current_user(req);
+        std::string content = req.get_param_value("content");
+        if (!user.empty() && !content.empty() && content.size() <= 2000) {
+            std::lock_guard<std::mutex> lock(db_mtx);
+            sqlite3_stmt* stmt;
+            if (sqlite3_prepare_v2(db, "INSERT INTO posts (user_id, username, content, created_at) VALUES (1, ?, ?, ?);", -1, &stmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_text(stmt, 1, user.c_str(), -1, SQLITE_STATIC);
+                sqlite3_bind_text(stmt, 2, content.c_str(), -1, SQLITE_STATIC);
+                sqlite3_bind_int64(stmt, 3, std::time(nullptr));
+                sqlite3_step(stmt);
+                sqlite3_finalize(stmt);
+            }
+        }
+        res.set_redirect("/");
+    });
+
+    // Лайк поста
+    svr.Post("/api/like", [](const httplib::Request& req, httplib::Response& res) {
+        const char* id_str = req.get_param_value("id").c_str();
+        char* end = nullptr;
+        long id = std::strtol(id_str, &end, 10);
+        if (*end != '\0' || id <= 0) {
+            res.set_content("{\"error\":\"invalid id\"}", "application/json");
+            return;
+        }
+        int likes = 0;
+        std::lock_guard<std::mutex> lock(db_mtx);
+        sqlite3_stmt* stmt;
+        if (sqlite3_prepare_v2(db, "UPDATE posts SET likes = likes + 1 WHERE id = ? RETURNING likes;", -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int(stmt, 1, static_cast<int>(id));
+            if (sqlite3_step(stmt) == SQLITE_ROW) likes = sqlite3_column_int(stmt, 0);
+            sqlite3_finalize(stmt);
+        }
+        res.set_content("{\"likes\":\"" + std::to_string(likes) + "\"}", "application/json");
+    });
+
+    std::cout << "RUTTR C++ Server running on port " << port << "\n";
+    svr.listen("0.0.0.0", port);
+    sqlite3_close(db);
+    return 0;
 }
