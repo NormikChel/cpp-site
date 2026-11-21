@@ -21,7 +21,7 @@ using json = nlohmann::json;
 sqlite3* db = nullptr;
 std::mutex db_mtx;
 
-// --- 1. СЛОВАРЬ ЛОКАЛИЗАЦИИ (i18n в стиле GETTR) ---
+// --- 1. СЛОВАРЬ (ru/en) ---
 std::map<std::string, std::map<std::string, std::string>> I18N = {
     {"ru", {
         {"ruttr.nav.home", "Главная"},
@@ -63,28 +63,20 @@ std::string t(const std::string& lang, const std::string& key) {
     return key;
 }
 
-// --- 2. МИНИФИКАТОР HTML/CSS/JS НА СЕРВЕРЕ ---
+// --- 2. МИНИФИКАТОР ---
 std::string minify_html(const std::string& html) {
-    std::string out;
-    out.reserve(html.size());
+    std::string out; out.reserve(html.size());
     bool in_space = false;
     for (size_t i = 0; i < html.size(); ++i) {
         char c = html[i];
         if (c == '\n' || c == '\r' || c == '\t') c = ' ';
         if (c == ' ') {
-            if (!in_space) {
-                out.push_back(' ');
-                in_space = true;
-            }
-        } else {
-            in_space = false;
-            out.push_back(c);
-        }
+            if (!in_space) { out.push_back(' '); in_space = true; }
+        } else { in_space = false; out.push_back(c); }
     }
     return out;
 }
 
-// Экранирование HTML для защиты от XSS
 std::string escape_html(const std::string& s) {
     std::string out;
     for (char c : s) {
@@ -99,17 +91,15 @@ std::string escape_html(const std::string& s) {
     return out;
 }
 
-// --- 3. КРИПТОГРАФИЯ (SHA-256 + ТОКЕНЫ СЕССИЙ) ---
+// --- 3. КРИПТО ---
 std::string hash_password(const std::string& password) {
     std::string salted = "ruttr_free_speech_salt_" + password;
-    unsigned char hash[EVP_MAX_MD_SIZE];
-    unsigned int length = 0;
+    unsigned char hash[EVP_MAX_MD_SIZE]; unsigned int length = 0;
     EVP_MD_CTX* ctx = EVP_MD_CTX_new();
     EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
     EVP_DigestUpdate(ctx, salted.c_str(), static_cast<int>(salted.size()));
     EVP_DigestFinal_ex(ctx, hash, &length);
     EVP_MD_CTX_free(ctx);
-
     std::stringstream ss;
     for (unsigned int i = 0; i < length; ++i)
         ss << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
@@ -117,43 +107,25 @@ std::string hash_password(const std::string& password) {
 }
 
 std::string gen_token() {
-    std::random_device rd;
-    std::mt19937_64 gen(rd());
+    std::random_device rd; std::mt19937_64 gen(rd());
     std::uniform_int_distribution<uint64_t> dis;
-    std::stringstream ss;
-    ss << std::hex << dis(gen) << dis(gen);
+    std::stringstream ss; ss << std::hex << dis(gen) << dis(gen);
     return ss.str();
 }
 
-// --- 4. ИНИЦИАЛИЗАЦИЯ SQLITE3 (db.sqlite3) ---
-// ВНИМАНИЕ: db и db_mtx объявлены ГЛОБАЛЬНО (строки 21-22)
-// Здесь — только функции, без повторных определений переменных
-
+// --- 4. ИНИЦИАЛИЗАЦИЯ БД ---
 void init_db() {
     const char* db_path = std::getenv("DB_PATH");
-    if (!db_path) {
-        std::cerr << "Ошибка: не установлена переменная DB_PATH\n";
-        exit(1);
-    }
-
+    if (!db_path) { std::cerr << "DB_PATH not set\n"; exit(1); }
     if (sqlite3_open(db_path, &db) != SQLITE_OK) {
-        std::cerr << "Ошибка открытия " << db_path
-                  << ": " << sqlite3_errmsg(db) << "\n";
+        std::cerr << "Ошибка открытия " << db_path << ": " << sqlite3_errmsg(db) << "\n";
         exit(1);
     }
-
-    // WAL + таймаут для конкурентного доступа
     char* err = nullptr;
-    const char* pragma_sql =
-        "PRAGMA journal_mode=WAL;"
-        "PRAGMA busy_timeout=5000;"
-        "PRAGMA foreign_keys=ON;";
+    const char* pragma_sql = "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;";
     if (sqlite3_exec(db, pragma_sql, nullptr, nullptr, &err) != SQLITE_OK) {
-        std::cerr << "PRAGMA error: " << err << "\n";
-        sqlite3_free(err);
+        std::cerr << "PRAGMA error: " << err << "\n"; sqlite3_free(err);
     }
-
-    // Создание таблиц (IF NOT EXISTS)
     const char* create_sql = R"(
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -175,10 +147,8 @@ void init_db() {
             created_at INTEGER NOT NULL
         );
     )";
-
     if (sqlite3_exec(db, create_sql, nullptr, nullptr, &err) != SQLITE_OK) {
-        std::cerr << "SQL create error: " << err << "\n";
-        sqlite3_free(err);
+        std::cerr << "SQL create error: " << err << "\n"; sqlite3_free(err);
     }
 }
 
@@ -201,19 +171,17 @@ std::string get_current_user(const httplib::Request& req) {
     std::string user = "";
     if (sqlite3_prepare_v2(db, "SELECT username FROM sessions WHERE token = ?;", -1, &stmt, nullptr) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_STATIC);
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            user = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        }
+        if (sqlite3_step(stmt) == SQLITE_ROW) user = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
         sqlite3_finalize(stmt);
     }
     return user;
 }
 
-// --- 5. SSR ГЕНЕРАЦИЯ СТРАНИЦЫ В СТИЛЕ GETTR ---
-std::string render_ssr_page(const std::string& current_user, const std::string& lang) {
-    // --- посты ---
+// --- 5. SSR СТРАНИЦЫ ---
+std::string render_page(const std::string& current_user, const std::string& lang, const std::string& page = "home") {
+    // --- посты (только для home / explore) ---
     std::string posts_html;
-    {
+    if (page == "home" || page == "explore") {
         std::lock_guard<std::mutex> lock(db_mtx);
         sqlite3_stmt* stmt;
         if (sqlite3_prepare_v2(db, "SELECT id, username, content, likes, created_at FROM posts ORDER BY id DESC LIMIT 50;", -1, &stmt, nullptr) == SQLITE_OK) {
@@ -222,7 +190,6 @@ std::string render_ssr_page(const std::string& current_user, const std::string& 
                 std::string author = escape_html(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
                 std::string text = escape_html(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2)));
                 int likes = sqlite3_column_int(stmt, 3);
-
                 posts_html += "<article class='post-card'>"
                     "<div class='post-header'>"
                         "<div class='avatar'>" + std::string(1, std::toupper(static_cast<unsigned char>(author[0]))) + "</div>"
@@ -237,9 +204,7 @@ std::string render_ssr_page(const std::string& current_user, const std::string& 
             sqlite3_finalize(stmt);
         }
     }
-    if (posts_html.empty()) {
-        posts_html = "<div class='empty-state'>" + t(lang, "ruttr.empty") + "</div>";
-    }
+    if (posts_html.empty()) posts_html = "<div class='empty-state'>" + t(lang, "ruttr.empty") + "</div>";
 
     // --- композитор / авторизация ---
     std::string composer_or_auth;
@@ -270,7 +235,6 @@ std::string render_ssr_page(const std::string& current_user, const std::string& 
         )";
     }
 
-    // --- raw HTML с плейсхолдерами (ОДНА СТРОКА, без конкатенации const char[]) ---
     std::string raw_html = R"(<!DOCTYPE html>
 <html lang="__LANG__">
 <head>
@@ -356,7 +320,6 @@ async function likePost(id, btn){
 </html>
 )";
 
-    // --- замены плейсхолдеров (исправлено: replace_all для подстрок) ---
     auto replace_all = [](std::string& str, const std::string& from, const std::string& to) {
         size_t pos = 0;
         while ((pos = str.find(from, pos)) != std::string::npos) {
@@ -380,7 +343,6 @@ async function likePost(id, btn){
     replace_all(raw_html, "__TRENDS_TITLE__", t(lang, "ruttr.trends.title"));
     replace_all(raw_html, "__EMPTY_STATE__", t(lang, "ruttr.empty"));
 
-    // --- __LOGOUT_SECTION__ (вставка или пустой блок) ---
     if (!current_user.empty()) {
         replace_all(raw_html, "__LOGOUT_SECTION__", R"(
         <form action="/api/logout" method="POST" style="display:inline;">
@@ -400,7 +362,6 @@ int main() {
     int port = port_env ? std::stoi(port_env) : 8080;
     httplib::Server svr;
 
-    // Переключение языка (i18n)
     svr.Get("/lang", [](const httplib::Request& req, httplib::Response& res) {
         std::string l = req.get_param_value("set");
         if (l != "ru" && l != "en") l = "ru";
@@ -408,22 +369,33 @@ int main() {
         res.set_redirect("/");
     });
 
-    // Главная страница (SSR)
     svr.Get("/", [](const httplib::Request& req, httplib::Response& res) {
         std::string lang = get_cookie(req, "ruttr_lang");
         if (lang != "en" && lang != "ru") lang = "ru";
         std::string user = get_current_user(req);
-        res.set_content(render_ssr_page(user, lang), "text/html; charset=utf-8");
+        res.set_content(render_page(user, lang, "home"), "text/html; charset=utf-8");
     });
 
-    // Регистрация
+    svr.Get("/explore", [](const httplib::Request& req, httplib::Response& res) {
+        std::string lang = get_cookie(req, "ruttr_lang");
+        if (lang != "en" && lang != "ru") lang = "ru";
+        std::string user = get_current_user(req);
+        res.set_content(render_page(user, lang, "explore"), "text/html; charset=utf-8");
+    });
+
+    svr.Get("/profile", [](const httplib::Request& req, httplib::Response& res) {
+        std::string lang = get_cookie(req, "ruttr_lang");
+        if (lang != "en" && lang != "ru") lang = "ru";
+        std::string user = get_current_user(req);
+        // можно добавить данные профиля
+        res.set_content(render_page(user, lang, "profile"), "text/html; charset=utf-8");
+    });
+
+    // API
     svr.Post("/api/register", [](const httplib::Request& req, httplib::Response& res) {
         std::string user = req.get_param_value("username");
         std::string pass = req.get_param_value("password");
-        if (user.size() < 3 || pass.size() < 4) {
-            res.set_redirect("/");
-            return;
-        }
+        if (user.size() < 3 || pass.size() < 4) { res.set_redirect("/"); return; }
         std::string hash = hash_password(pass);
         std::lock_guard<std::mutex> lock(db_mtx);
         sqlite3_stmt* stmt;
@@ -431,20 +403,17 @@ int main() {
             sqlite3_bind_text(stmt, 1, user.c_str(), -1, SQLITE_STATIC);
             sqlite3_bind_text(stmt, 2, hash.c_str(), -1, SQLITE_STATIC);
             sqlite3_bind_int64(stmt, 3, std::time(nullptr));
-            sqlite3_step(stmt);
-            sqlite3_finalize(stmt);
+            sqlite3_step(stmt); sqlite3_finalize(stmt);
         }
         res.set_redirect("/");
     });
 
-    // Вход
     svr.Post("/api/login", [](const httplib::Request& req, httplib::Response& res) {
         std::string user = req.get_param_value("username");
         std::string pass = req.get_param_value("password");
         std::string hash = hash_password(pass);
         std::lock_guard<std::mutex> lock(db_mtx);
-        sqlite3_stmt* stmt;
-        int uid = -1;
+        sqlite3_stmt* stmt; int uid = -1;
         if (sqlite3_prepare_v2(db, "SELECT id FROM users WHERE username = ? AND password_hash = ?;", -1, &stmt, nullptr) == SQLITE_OK) {
             sqlite3_bind_text(stmt, 1, user.c_str(), -1, SQLITE_STATIC);
             sqlite3_bind_text(stmt, 2, hash.c_str(), -1, SQLITE_STATIC);
@@ -457,15 +426,13 @@ int main() {
                 sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_STATIC);
                 sqlite3_bind_int(stmt, 2, uid);
                 sqlite3_bind_text(stmt, 3, user.c_str(), -1, SQLITE_STATIC);
-                sqlite3_step(stmt);
-                sqlite3_finalize(stmt);
+                sqlite3_step(stmt); sqlite3_finalize(stmt);
             }
             res.set_header("Set-Cookie", "ruttr_session=" + token + "; Path=/; HttpOnly; Max-Age=2592000");
         }
         res.set_redirect("/");
     });
 
-    // Выход
     svr.Post("/api/logout", [](const httplib::Request& req, httplib::Response& res) {
         std::string token = get_cookie(req, "ruttr_session");
         if (!token.empty()) {
@@ -473,15 +440,13 @@ int main() {
             sqlite3_stmt* stmt;
             if (sqlite3_prepare_v2(db, "DELETE FROM sessions WHERE token = ?;", -1, &stmt, nullptr) == SQLITE_OK) {
                 sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_STATIC);
-                sqlite3_step(stmt);
-                sqlite3_finalize(stmt);
+                sqlite3_step(stmt); sqlite3_finalize(stmt);
             }
         }
         res.set_header("Set-Cookie", "ruttr_session=; Path=/; Max-Age=0");
         res.set_redirect("/");
     });
 
-    // Создание поста
     svr.Post("/api/post", [](const httplib::Request& req, httplib::Response& res) {
         std::string user = get_current_user(req);
         std::string content = req.get_param_value("content");
@@ -492,22 +457,16 @@ int main() {
                 sqlite3_bind_text(stmt, 1, user.c_str(), -1, SQLITE_STATIC);
                 sqlite3_bind_text(stmt, 2, content.c_str(), -1, SQLITE_STATIC);
                 sqlite3_bind_int64(stmt, 3, std::time(nullptr));
-                sqlite3_step(stmt);
-                sqlite3_finalize(stmt);
+                sqlite3_step(stmt); sqlite3_finalize(stmt);
             }
         }
         res.set_redirect("/");
     });
 
-    // Лайк поста (исправлено: временная строка сохранена)
     svr.Post("/api/like", [](const httplib::Request& req, httplib::Response& res) {
         std::string id_val = req.get_param_value("id");
-        char* end = nullptr;
-        long id = std::strtol(id_val.c_str(), &end, 10);
-        if (*end != '\0' || id <= 0) {
-            res.set_content("{\"error\":\"invalid id\"}", "application/json");
-            return;
-        }
+        char* end = nullptr; long id = std::strtol(id_val.c_str(), &end, 10);
+        if (*end != '\0' || id <= 0) { res.set_content("{\"error\":\"invalid id\"}", "application/json"); return; }
         int likes = 0;
         std::lock_guard<std::mutex> lock(db_mtx);
         sqlite3_stmt* stmt;
