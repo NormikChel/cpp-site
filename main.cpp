@@ -113,7 +113,7 @@ std::string gen_token() {
     return ss.str();
 }
 
-// --- 4. ИНИЦИАЛИЗАЦИЯ POSTGRESQL ---
+// --- 4. ИНИЦИАЛИЗАЦИЯ И ПРОВЕРКА POSTGRESQL ---
 bool pg_exec_simple(const char* sql) {
     PGresult* res = PQexec(db, sql);
     ExecStatusType st = PQresultStatus(res);
@@ -150,13 +150,40 @@ PGresult* pg_query_params(const char* sql, const std::vector<std::string>& param
     return res;
 }
 
+bool check_db_health() {
+    std::lock_guard<std::mutex> lock(db_mtx);
+    if (!db) return false;
+
+    if (PQstatus(db) != CONNECTION_OK) {
+        PQreset(db);
+        if (PQstatus(db) != CONNECTION_OK) {
+            return false;
+        }
+    }
+
+    PGresult* res = PQexec(db, "SELECT 1;");
+    bool ok = (res && PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) > 0);
+    if (res) PQclear(res);
+
+    if (!ok) {
+        PQreset(db);
+        if (PQstatus(db) == CONNECTION_OK) {
+            PGresult* retry = PQexec(db, "SELECT 1;");
+            ok = (retry && PQresultStatus(retry) == PGRES_TUPLES_OK && PQntuples(retry) > 0);
+            if (retry) PQclear(retry);
+        }
+    }
+    return ok;
+}
+
 void init_db() {
     const char* db_url = std::getenv("DATABASE_URL");
-    std::string conn_str = (db_url && *db_url)
-        ? std::string(db_url)
-        : std::string("postgresql://postgres:J5huAyahidOkvjRaCjyAyqqAd9i07Kj9@ruttr.db.hostless.cloud:5432/ruttr?sslmode=require");
+    if (!db_url || !*db_url) {
+        std::cerr << "DATABASE_URL is not set in environment\n";
+        std::exit(1);
+    }
 
-    db = PQconnectdb(conn_str.c_str());
+    db = PQconnectdb(db_url);
     if (PQstatus(db) != CONNECTION_OK) {
         std::cerr << "Ошибка подключения к PostgreSQL: " << PQerrorMessage(db) << "\n";
         PQfinish(db);
@@ -409,6 +436,18 @@ int main() {
     const char* port_env = std::getenv("PORT");
     int port = port_env ? std::stoi(port_env) : 8080;
     httplib::Server svr;
+
+    auto handle_health = [](const httplib::Request&, httplib::Response& res) {
+        if (check_db_health()) {
+            res.status = 200;
+            res.set_content(R"({"status":"ok","db":"connected"})", "application/json");
+        } else {
+            res.status = 503;
+            res.set_content(R"({"status":"error","db":"disconnected"})", "application/json");
+        }
+    };
+    svr.Get("/health", handle_health);
+    svr.Get("/api/health", handle_health);
 
     svr.Get("/lang", [](const httplib::Request& req, httplib::Response& res) {
         std::string l = req.get_param_value("set");

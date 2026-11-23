@@ -6,7 +6,6 @@ WORKDIR /app
 COPY server /app/server
 RUN chmod +x /app/server
 
-ENV DATABASE_URL="postgresql://postgres:J5huAyahidOkvjRaCjyAyqqAd9i07Kj9@ruttr.db.hostless.cloud:5432/ruttr?sslmode=require"
 ENV PORT=8080
 
 EXPOSE 8080
