@@ -11,14 +11,14 @@
 #include <random>
 #include <ctime>
 #include <algorithm>
-#include <sqlite3.h>
+#include <libpq-fe.h>
 #include <openssl/evp.h>
 #include "httplib.h"
 #include "nlohmann/json.hpp"
 
 using json = nlohmann::json;
 
-sqlite3* db = nullptr;
+PGconn* db = nullptr;
 std::mutex db_mtx;
 
 // --- 1. СЛОВАРЬ (ru/en) ---
@@ -113,25 +113,62 @@ std::string gen_token() {
     return ss.str();
 }
 
-// --- 4. ИНИЦИАЛИЗАЦИЯ БД ---
+// --- 4. ИНИЦИАЛИЗАЦИЯ POSTGRESQL ---
+bool pg_exec_simple(const char* sql) {
+    PGresult* res = PQexec(db, sql);
+    ExecStatusType st = PQresultStatus(res);
+    if (st != PGRES_COMMAND_OK && st != PGRES_TUPLES_OK) {
+        std::cerr << "PG SQL error: " << PQerrorMessage(db) << "\n";
+        PQclear(res);
+        return false;
+    }
+    PQclear(res);
+    return true;
+}
+
+PGresult* pg_query_params(const char* sql, const std::vector<std::string>& params) {
+    std::vector<const char*> vals;
+    vals.reserve(params.size());
+    for (const auto& p : params) vals.push_back(p.c_str());
+
+    PGresult* res = PQexecParams(
+        db,
+        sql,
+        static_cast<int>(vals.size()),
+        nullptr,
+        vals.empty() ? nullptr : vals.data(),
+        nullptr,
+        nullptr,
+        0
+    );
+    ExecStatusType st = PQresultStatus(res);
+    if (st != PGRES_COMMAND_OK && st != PGRES_TUPLES_OK) {
+        std::cerr << "PG query error: " << PQerrorMessage(db) << "\n";
+        PQclear(res);
+        return nullptr;
+    }
+    return res;
+}
+
 void init_db() {
-    const char* db_path = std::getenv("DB_PATH");
-    if (!db_path) { std::cerr << "DB_PATH not set\n"; exit(1); }
-    if (sqlite3_open(db_path, &db) != SQLITE_OK) {
-        std::cerr << "Ошибка открытия " << db_path << ": " << sqlite3_errmsg(db) << "\n";
-        exit(1);
+    const char* db_url = std::getenv("DATABASE_URL");
+    std::string conn_str = (db_url && *db_url)
+        ? std::string(db_url)
+        : std::string("postgresql://postgres:J5huAyahidOkvjRaCjyAyqqAd9i07Kj9@ruttr.db.hostless.cloud:5432/ruttr?sslmode=require");
+
+    db = PQconnectdb(conn_str.c_str());
+    if (PQstatus(db) != CONNECTION_OK) {
+        std::cerr << "Ошибка подключения к PostgreSQL: " << PQerrorMessage(db) << "\n";
+        PQfinish(db);
+        std::exit(1);
     }
-    char* err = nullptr;
-    const char* pragma_sql = "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;";
-    if (sqlite3_exec(db, pragma_sql, nullptr, nullptr, &err) != SQLITE_OK) {
-        std::cerr << "PRAGMA error: " << err << "\n"; sqlite3_free(err);
-    }
+
     const char* create_sql = R"(
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
-            created_at INTEGER NOT NULL
+            created_at BIGINT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS sessions (
             token TEXT PRIMARY KEY,
@@ -139,16 +176,17 @@ void init_db() {
             username TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS posts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             user_id INTEGER NOT NULL,
             username TEXT NOT NULL,
             content TEXT NOT NULL,
             likes INTEGER DEFAULT 0,
-            created_at INTEGER NOT NULL
+            created_at BIGINT NOT NULL
         );
     )";
-    if (sqlite3_exec(db, create_sql, nullptr, nullptr, &err) != SQLITE_OK) {
-        std::cerr << "SQL create error: " << err << "\n"; sqlite3_free(err);
+    if (!pg_exec_simple(create_sql)) {
+        PQfinish(db);
+        std::exit(1);
     }
 }
 
@@ -167,46 +205,56 @@ std::string get_current_user(const httplib::Request& req) {
     std::string token = get_cookie(req, "ruttr_session");
     if (token.empty()) return "";
     std::lock_guard<std::mutex> lock(db_mtx);
-    sqlite3_stmt* stmt;
     std::string user = "";
-    if (sqlite3_prepare_v2(db, "SELECT username FROM sessions WHERE token = ?;", -1, &stmt, nullptr) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_STATIC);
-        if (sqlite3_step(stmt) == SQLITE_ROW) user = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        sqlite3_finalize(stmt);
+    PGresult* res = pg_query_params("SELECT username FROM sessions WHERE token = $1;", {token});
+    if (res) {
+        if (PQntuples(res) > 0) {
+            user = PQgetvalue(res, 0, 0);
+        }
+        PQclear(res);
     }
     return user;
 }
 
 // --- 5. SSR СТРАНИЦЫ ---
 std::string render_page(const std::string& current_user, const std::string& lang, const std::string& page = "home") {
-    // --- посты (только для home / explore) ---
     std::string posts_html;
     if (page == "home" || page == "explore") {
         std::lock_guard<std::mutex> lock(db_mtx);
-        sqlite3_stmt* stmt;
-        if (sqlite3_prepare_v2(db, "SELECT id, username, content, likes, created_at FROM posts ORDER BY id DESC LIMIT 50;", -1, &stmt, nullptr) == SQLITE_OK) {
-            while (sqlite3_step(stmt) == SQLITE_ROW) {
-                int id = sqlite3_column_int(stmt, 0);
-                std::string author = escape_html(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
-                std::string text = escape_html(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2)));
-                int likes = sqlite3_column_int(stmt, 3);
+        PGresult* res = pg_query_params(
+            "SELECT id, username, content, likes, created_at FROM posts ORDER BY id DESC LIMIT 50;",
+            {}
+        );
+        if (res) {
+            int rows = PQntuples(res);
+            for (int i = 0; i < rows; ++i) {
+                std::string id_str = PQgetvalue(res, i, 0);
+                std::string raw_author = PQgetvalue(res, i, 1);
+                std::string raw_text = PQgetvalue(res, i, 2);
+                std::string likes_str = PQgetvalue(res, i, 3);
+
+                std::string author = escape_html(raw_author);
+                std::string text = escape_html(raw_text);
+                char initial = raw_author.empty()
+                    ? '?'
+                    : static_cast<char>(std::toupper(static_cast<unsigned char>(raw_author[0])));
+
                 posts_html += "<article class='post-card'>"
                     "<div class='post-header'>"
-                        "<div class='avatar'>" + std::string(1, std::toupper(static_cast<unsigned char>(author[0]))) + "</div>"
+                        "<div class='avatar'>" + std::string(1, initial) + "</div>"
                         "<div><span class='author-name'>" + author + "</span> <span class='handle'>@" + author + "</span></div>"
                     "</div>"
                     "<div class='post-body'>" + text + "</div>"
                     "<div class='post-actions'>"
-                        "<button class='like-btn' onclick='likePost(\"" + std::to_string(id) + "\", this)'>♥ <span>" + std::to_string(likes) + "</span></button>"
+                        "<button class='like-btn' onclick='likePost(\"" + id_str + "\", this)'>♥ <span>" + likes_str + "</span></button>"
                     "</div>"
                 "</article>";
             }
-            sqlite3_finalize(stmt);
+            PQclear(res);
         }
     }
     if (posts_html.empty()) posts_html = "<div class='empty-state'>" + t(lang, "ruttr.empty") + "</div>";
 
-    // --- композитор / авторизация ---
     std::string composer_or_auth;
     if (!current_user.empty()) {
         composer_or_auth = R"(
@@ -387,7 +435,6 @@ int main() {
         std::string lang = get_cookie(req, "ruttr_lang");
         if (lang != "en" && lang != "ru") lang = "ru";
         std::string user = get_current_user(req);
-        // можно добавить данные профиля
         res.set_content(render_page(user, lang, "profile"), "text/html; charset=utf-8");
     });
 
@@ -397,14 +444,13 @@ int main() {
         std::string pass = req.get_param_value("password");
         if (user.size() < 3 || pass.size() < 4) { res.set_redirect("/"); return; }
         std::string hash = hash_password(pass);
+        std::string now_str = std::to_string(static_cast<long long>(std::time(nullptr)));
         std::lock_guard<std::mutex> lock(db_mtx);
-        sqlite3_stmt* stmt;
-        if (sqlite3_prepare_v2(db, "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?);", -1, &stmt, nullptr) == SQLITE_OK) {
-            sqlite3_bind_text(stmt, 1, user.c_str(), -1, SQLITE_STATIC);
-            sqlite3_bind_text(stmt, 2, hash.c_str(), -1, SQLITE_STATIC);
-            sqlite3_bind_int64(stmt, 3, std::time(nullptr));
-            sqlite3_step(stmt); sqlite3_finalize(stmt);
-        }
+        PGresult* r = pg_query_params(
+            "INSERT INTO users (username, password_hash, created_at) VALUES ($1, $2, $3) ON CONFLICT (username) DO NOTHING;",
+            {user, hash, now_str}
+        );
+        if (r) PQclear(r);
         res.set_redirect("/");
     });
 
@@ -413,21 +459,22 @@ int main() {
         std::string pass = req.get_param_value("password");
         std::string hash = hash_password(pass);
         std::lock_guard<std::mutex> lock(db_mtx);
-        sqlite3_stmt* stmt; int uid = -1;
-        if (sqlite3_prepare_v2(db, "SELECT id FROM users WHERE username = ? AND password_hash = ?;", -1, &stmt, nullptr) == SQLITE_OK) {
-            sqlite3_bind_text(stmt, 1, user.c_str(), -1, SQLITE_STATIC);
-            sqlite3_bind_text(stmt, 2, hash.c_str(), -1, SQLITE_STATIC);
-            if (sqlite3_step(stmt) == SQLITE_ROW) uid = sqlite3_column_int(stmt, 0);
-            sqlite3_finalize(stmt);
+        std::string uid_str;
+        PGresult* r = pg_query_params(
+            "SELECT id FROM users WHERE username = $1 AND password_hash = $2;",
+            {user, hash}
+        );
+        if (r) {
+            if (PQntuples(r) > 0) uid_str = PQgetvalue(r, 0, 0);
+            PQclear(r);
         }
-        if (uid > 0) {
+        if (!uid_str.empty()) {
             std::string token = gen_token();
-            if (sqlite3_prepare_v2(db, "INSERT INTO sessions (token, user_id, username) VALUES (?, ?, ?);", -1, &stmt, nullptr) == SQLITE_OK) {
-                sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_STATIC);
-                sqlite3_bind_int(stmt, 2, uid);
-                sqlite3_bind_text(stmt, 3, user.c_str(), -1, SQLITE_STATIC);
-                sqlite3_step(stmt); sqlite3_finalize(stmt);
-            }
+            PGresult* ins = pg_query_params(
+                "INSERT INTO sessions (token, user_id, username) VALUES ($1, $2, $3);",
+                {token, uid_str, user}
+            );
+            if (ins) PQclear(ins);
             res.set_header("Set-Cookie", "ruttr_session=" + token + "; Path=/; HttpOnly; Max-Age=2592000");
         }
         res.set_redirect("/");
@@ -437,11 +484,8 @@ int main() {
         std::string token = get_cookie(req, "ruttr_session");
         if (!token.empty()) {
             std::lock_guard<std::mutex> lock(db_mtx);
-            sqlite3_stmt* stmt;
-            if (sqlite3_prepare_v2(db, "DELETE FROM sessions WHERE token = ?;", -1, &stmt, nullptr) == SQLITE_OK) {
-                sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_STATIC);
-                sqlite3_step(stmt); sqlite3_finalize(stmt);
-            }
+            PGresult* r = pg_query_params("DELETE FROM sessions WHERE token = $1;", {token});
+            if (r) PQclear(r);
         }
         res.set_header("Set-Cookie", "ruttr_session=; Path=/; Max-Age=0");
         res.set_redirect("/");
@@ -451,14 +495,19 @@ int main() {
         std::string user = get_current_user(req);
         std::string content = req.get_param_value("content");
         if (!user.empty() && !content.empty() && content.size() <= 2000) {
+            std::string now_str = std::to_string(static_cast<long long>(std::time(nullptr)));
             std::lock_guard<std::mutex> lock(db_mtx);
-            sqlite3_stmt* stmt;
-            if (sqlite3_prepare_v2(db, "INSERT INTO posts (user_id, username, content, created_at) VALUES (1, ?, ?, ?);", -1, &stmt, nullptr) == SQLITE_OK) {
-                sqlite3_bind_text(stmt, 1, user.c_str(), -1, SQLITE_STATIC);
-                sqlite3_bind_text(stmt, 2, content.c_str(), -1, SQLITE_STATIC);
-                sqlite3_bind_int64(stmt, 3, std::time(nullptr));
-                sqlite3_step(stmt); sqlite3_finalize(stmt);
+            std::string uid_str = "1";
+            PGresult* ures = pg_query_params("SELECT id FROM users WHERE username = $1;", {user});
+            if (ures) {
+                if (PQntuples(ures) > 0) uid_str = PQgetvalue(ures, 0, 0);
+                PQclear(ures);
             }
+            PGresult* r = pg_query_params(
+                "INSERT INTO posts (user_id, username, content, created_at) VALUES ($1, $2, $3, $4);",
+                {uid_str, user, content, now_str}
+            );
+            if (r) PQclear(r);
         }
         res.set_redirect("/");
     });
@@ -466,20 +515,25 @@ int main() {
     svr.Post("/api/like", [](const httplib::Request& req, httplib::Response& res) {
         std::string id_val = req.get_param_value("id");
         char* end = nullptr; long id = std::strtol(id_val.c_str(), &end, 10);
-        if (*end != '\0' || id <= 0) { res.set_content("{\"error\":\"invalid id\"}", "application/json"); return; }
-        int likes = 0;
-        std::lock_guard<std::mutex> lock(db_mtx);
-        sqlite3_stmt* stmt;
-        if (sqlite3_prepare_v2(db, "UPDATE posts SET likes = likes + 1 WHERE id = ? RETURNING likes;", -1, &stmt, nullptr) == SQLITE_OK) {
-            sqlite3_bind_int(stmt, 1, static_cast<int>(id));
-            if (sqlite3_step(stmt) == SQLITE_ROW) likes = sqlite3_column_int(stmt, 0);
-            sqlite3_finalize(stmt);
+        if (*end != '\0' || id <= 0) {
+            res.set_content("{\"error\":\"invalid id\"}", "application/json");
+            return;
         }
-        res.set_content("{\"likes\":\"" + std::to_string(likes) + "\"}", "application/json");
+        std::string likes = "0";
+        std::lock_guard<std::mutex> lock(db_mtx);
+        PGresult* r = pg_query_params(
+            "UPDATE posts SET likes = likes + 1 WHERE id = $1 RETURNING likes;",
+            {std::to_string(id)}
+        );
+        if (r) {
+            if (PQntuples(r) > 0) likes = PQgetvalue(r, 0, 0);
+            PQclear(r);
+        }
+        res.set_content("{\"likes\":\"" + likes + "\"}", "application/json");
     });
 
-    std::cout << "RUTTR C++ Server running on port " << port << "\n";
+    std::cout << "RUTTR C++ Server (PostgreSQL) running on port " << port << "\n";
     svr.listen("0.0.0.0", port);
-    sqlite3_close(db);
+    PQfinish(db);
     return 0;
 }
