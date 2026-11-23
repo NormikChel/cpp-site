@@ -22,13 +22,16 @@ jobs:
 
       - name: Ставим g++, nlohmann-json, OpenSSL и libpq-dev
         run: |
-          sudo apt-get update
-          sudo apt-get install -y g++ nlohmann-json3-dev libssl-dev libpq-dev
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends g++ nlohmann-json3-dev libssl-dev libpq-dev postgresql-client
+          pg_config --includedir
+          find /usr/include -name "libpq-fe.h"
 
       - name: Копируем httplib.h и компилируем C++ (-O3)
         run: |
           cp cpp-httplib/httplib.h .
-          g++ -O3 main.cpp -o server -I/usr/include/nlohmann -lpq -lcrypto -lpthread
+          PQ_INC="$(pg_config --includedir)"
+          g++ -O3 main.cpp -o server -I/usr/include/nlohmann -I"$PQ_INC" -lpq -lcrypto -lpthread
 
       - name: Заливаем готовый бинарник в репозиторий
         run: |
